@@ -1170,6 +1170,90 @@ class TestTransformOtelToClickhouse:
         assert spans[0].get("input_tokens") is not None
         assert spans[0].get("output_tokens") is not None
 
+    @staticmethod
+    def _openai_stream_without_usage(output_value: str, output_message: list[dict]) -> dict:
+        """openinference-openai's span for chat.completions.create(stream=True), no usage."""
+        from unittest.mock import patch
+
+        tool_schema = (
+            '{"type": "function", "function": {"name": "get_weather", "description": '
+            '"Get weather", "parameters": {"type": "object", "properties": '
+            '{"city": {"type": "string"}}, "required": ["city"]}}}'
+        )
+        payload = make_otel_payload(
+            [
+                make_span(
+                    "aa" * 16,
+                    "bb" * 8,
+                    name="ChatCompletion",
+                    attributes=[
+                        make_attr("openinference.span.kind", "LLM"),
+                        make_attr("llm.model_name", "gpt-4o"),
+                        make_attr(
+                            "input.value",
+                            '{"model": "gpt-4o", "stream": true, "messages": [{"role": '
+                            '"system", "content": "You are helpful."}, {"role": "user", '
+                            '"content": "What\'s the weather in Tokyo?"}], "tools": ['
+                            f"{tool_schema}]}}",
+                        ),
+                        make_attr("output.value", output_value),
+                        make_attr("llm.tools.0.tool.json_schema", tool_schema),
+                        make_attr("llm.input_messages.0.message.role", "system"),
+                        make_attr("llm.input_messages.0.message.content", "You are helpful."),
+                        make_attr("llm.input_messages.1.message.role", "user"),
+                        make_attr(
+                            "llm.input_messages.1.message.content", "What's the weather in Tokyo?"
+                        ),
+                        make_attr("llm.output_messages.0.message.role", "assistant"),
+                        *output_message,
+                    ],
+                )
+            ],
+            scope_name="openinference.instrumentation.openai",
+        )
+        prices = {"input": 0.0000025, "output": 0.00001}
+        with patch("worker.tokens.pricing.get_model_price", return_value=prices):
+            _, spans = transform_otel_to_clickhouse(payload, "proj-1")
+        return spans[0]
+
+    def test_estimated_output_counts_the_reply_not_the_response_json(self):
+        from worker.tokens import count_tokens
+
+        reply = "The capital of France is Paris."
+        span = self._openai_stream_without_usage(
+            '{"choices": [{"message": {"content": "The capital of France is Paris.", "role": '
+            '"assistant"}, "index": 0, "finish_reason": "stop"}], "id": "chatcmpl-1", '
+            '"created": 1795674949, "model": "gpt-4o", "object": "chat.completion.chunk"}',
+            [make_attr("llm.output_messages.0.message.content", reply)],
+        )
+        assert span["output_tokens"] == count_tokens(reply, "gpt-4o")
+
+    def test_estimated_tokens_count_the_tool_call_and_billed_prompt_not_the_json(self):
+        from worker.tokens import count_tokens
+
+        span = self._openai_stream_without_usage(
+            '{"choices": [{"message": {"tool_calls": [{"id": "call_1", "function": '
+            '{"arguments": "{\\"city\\": \\"Tokyo\\"}", "name": "get_weather"}, "index": 0, '
+            '"type": "function"}], "role": "assistant"}, "index": 0, "finish_reason": '
+            '"tool_calls"}], "id": "chatcmpl-1", "created": 1795674954, "model": "gpt-4o", '
+            '"object": "chat.completion.chunk"}',
+            [
+                make_attr("llm.output_messages.0.message.tool_calls.0.tool_call.id", "call_1"),
+                make_attr(
+                    "llm.output_messages.0.message.tool_calls.0.tool_call.function.name",
+                    "get_weather",
+                ),
+                make_attr(
+                    "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments",
+                    '{"city": "Tokyo"}',
+                ),
+            ],
+        )
+        assert span["output_tokens"] == count_tokens('get_weather\n{"city": "Tokyo"}', "gpt-4o")
+        prompt = "You are helpful.\nWhat's the weather in Tokyo?"
+        assert span["input_tokens"] > count_tokens(prompt, "gpt-4o")
+        assert span["input_tokens"] < count_tokens(span["input"], "gpt-4o")
+
     def test_openinference_input_output(self):
         trace_hex = "aa" * 16
         span_hex = "bb" * 8

@@ -35,6 +35,7 @@ import base64
 import json
 import logging
 import math
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -584,6 +585,44 @@ def _is_embedding_span(attrs: dict[str, Any]) -> bool:
         or str_attr(attrs.get("gen_ai.operation.name")).lower() == "embeddings"
         or _is_vercel_embedding_call(attrs)
     )
+
+
+# What the model read or generated in an OpenInference message: the content, each
+# text part, and each tool call. openinference-anthropic restates every tool call under
+# message.contents.N as well, so only the message.tool_calls copy is matched.
+_MESSAGE_TEXT_KEY = re.compile(
+    r"\d+\.message\.(?:content|contents\.\d+\.message_content\.text"
+    r"|tool_calls\.\d+\.tool_call\.function\.(?:name|arguments))"
+)
+_TOOL_SCHEMA_KEY = re.compile(r"llm\.tools\.\d+\.tool\.json_schema")
+
+
+def _messages_text(attrs: dict[str, Any], messages_attribute: str) -> str | None:
+    """The text and tool calls of an OpenInference message list, None when the span has none.
+
+    ``input.value`` / ``output.value`` hold the serialized request and response (ids,
+    roles, model, finish reasons), which is not what the model read or generated.
+    """
+    prefix = f"{messages_attribute}."
+    message_keys = [key for key in attrs if key.startswith(prefix)]
+    if not message_keys:
+        return None
+    return "\n".join(
+        str(attrs[key]) for key in message_keys if _MESSAGE_TEXT_KEY.fullmatch(key, len(prefix))
+    )
+
+
+def _estimation_input_text(attrs: dict[str, Any], recorded_input: str | None) -> str | None:
+    messages = _messages_text(attrs, "llm.input_messages")
+    if messages is None:
+        return recorded_input
+    tool_schemas = [str(value) for key, value in attrs.items() if _TOOL_SCHEMA_KEY.fullmatch(key)]
+    return "\n".join([messages, *tool_schemas])
+
+
+def _estimation_output_text(attrs: dict[str, Any], recorded_output: str | None) -> str | None:
+    messages = _messages_text(attrs, "llm.output_messages")
+    return recorded_output if messages is None else messages
 
 
 def get_span_kind(attrs: dict[str, Any], otel_kind: int | str | None) -> str:
@@ -1187,8 +1226,10 @@ def transform_otel_to_clickhouse(
 
                         usage = calculate_cost(
                             model=model_name,
-                            input_text=span_record.get("input"),
-                            output_text=span_record.get("output"),
+                            input_text=_estimation_input_text(span_attrs, span_record.get("input")),
+                            output_text=_estimation_output_text(
+                                span_attrs, span_record.get("output")
+                            ),
                         )
                         if usage["input_tokens"] is not None:
                             span_record["input_tokens"] = usage["input_tokens"]
