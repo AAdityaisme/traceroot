@@ -1228,6 +1228,36 @@ class TestTransformOtelToClickhouse:
         )
         assert span["output_tokens"] == count_tokens(reply, "gpt-4o")
 
+    def test_estimated_output_ignores_message_attributes_without_a_value(self):
+        from worker.tokens import count_tokens
+
+        reply = "The capital of France is Paris."
+        span = self._openai_stream_without_usage(
+            reply,
+            [
+                make_attr("llm.output_messages.0.message.content", reply),
+                {
+                    "key": "llm.output_messages.0.message.contents.0.message_content.text",
+                    "value": {},
+                },
+            ],
+        )
+        assert span["output_tokens"] == count_tokens(reply, "gpt-4o")
+
+    def test_estimated_output_counts_a_legacy_function_call(self):
+        from worker.tokens import count_tokens
+
+        arguments = '{"city": "Tokyo"}'
+        span = self._openai_stream_without_usage(
+            '{"choices": [{"message": {"function_call": {"name": "get_weather", "arguments": '
+            '"{\\"city\\": \\"Tokyo\\"}"}, "role": "assistant"}}]}',
+            [
+                make_attr("llm.output_messages.0.message.function_call_name", "get_weather"),
+                make_attr("llm.output_messages.0.message.function_call_arguments_json", arguments),
+            ],
+        )
+        assert span["output_tokens"] == count_tokens(f"get_weather\n{arguments}", "gpt-4o")
+
     def test_estimated_tokens_count_the_tool_call_and_billed_prompt_not_the_json(self):
         from worker.tokens import count_tokens
 

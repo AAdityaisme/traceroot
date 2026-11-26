@@ -588,11 +588,13 @@ def _is_embedding_span(attrs: dict[str, Any]) -> bool:
 
 
 # What the model read or generated in an OpenInference message: the content, each
-# text part, and each tool call. openinference-anthropic restates every tool call under
-# message.contents.N as well, so only the message.tool_calls copy is matched.
+# text part, and each tool call (including a legacy functions= call). openinference-
+# anthropic restates every tool call under message.contents.N as well, so only the
+# message.tool_calls copy is matched.
 _MESSAGE_TEXT_KEY = re.compile(
     r"\d+\.message\.(?:content|contents\.\d+\.message_content\.text"
-    r"|tool_calls\.\d+\.tool_call\.function\.(?:name|arguments))"
+    r"|tool_calls\.\d+\.tool_call\.function\.(?:name|arguments)"
+    r"|function_call_name|function_call_arguments_json)"
 )
 _TOOL_SCHEMA_KEY = re.compile(r"llm\.tools\.\d+\.tool\.json_schema")
 
@@ -608,7 +610,9 @@ def _messages_text(attrs: dict[str, Any], messages_attribute: str) -> str | None
     if not message_keys:
         return None
     return "\n".join(
-        str(attrs[key]) for key in message_keys if _MESSAGE_TEXT_KEY.fullmatch(key, len(prefix))
+        str(attrs[key])
+        for key in message_keys
+        if attrs[key] is not None and _MESSAGE_TEXT_KEY.fullmatch(key, len(prefix))
     )
 
 
